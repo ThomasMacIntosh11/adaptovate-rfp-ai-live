@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, String, Float, Text
-from .database import Base
+from database import Base
 
 class RFP(Base):
     __tablename__ = "rfps"

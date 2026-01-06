@@ -12,9 +12,9 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-from .rfp_scraper import scrape_real_rfps
-from .relevance import compute_rule_score
-from .ai_utils import summarize_rfp, score_relevance, structured_summary, strategic_insights
+from rfp_scraper import scrape_real_rfps
+from relevance import compute_rule_score
+from ai_utils import summarize_rfp, score_relevance, structured_summary, strategic_insights
 
 # Always load env from backend folder
 BASE_DIR = os.path.dirname(__file__)
