@@ -10,3 +10,5 @@ pandas
 sqlalchemy
 
 openai
+
+python-multipart
