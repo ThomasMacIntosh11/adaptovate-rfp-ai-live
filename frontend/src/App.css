@@ -40,6 +40,17 @@ body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI
 .detail-header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 18px; }
 .detail-header h2 { margin: 0; font-size: 28px; }
 .detail-header p { margin: 4px 0 0; color: var(--muted); }
+.login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #f8fafc; padding: 24px; }
+.login-card { width: 100%; max-width: 420px; background: #fff; border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow); padding: 28px; }
+.login-header h1 { margin: 0 0 6px; font-size: 26px; }
+.login-header p { margin: 0 0 18px; color: var(--muted); }
+.login-form { display: flex; flex-direction: column; gap: 8px; }
+.login-form label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.login-form input { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-family: inherit; }
+.login-form input:focus { outline: none; border-color: #bae6fd; box-shadow: 0 0 0 3px rgba(14,165,233,.18); }
+.login-error { color: #b91c1c; font-size: 13px; margin: 4px 0 0; }
+.login-btn { margin-top: 8px; background: var(--primary); color: #fff; border: none; padding: 10px 14px; border-radius: 10px; cursor: pointer; }
+.login-btn:hover { background: var(--primary-600); }
 .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin: 16px 0; }
 .detail-section { border: 1px solid var(--border); border-radius: 14px; padding: 16px; background: #fff; }
 .detail-section h4 { margin: 0 0 8px; text-transform: uppercase; font-size: 12px; letter-spacing: 0.1em; color: var(--muted); }

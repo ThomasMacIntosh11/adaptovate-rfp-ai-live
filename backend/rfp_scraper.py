@@ -3,10 +3,10 @@ import os
 import re
 from typing import List, Dict, Any
 
-from .rfp_sources_canadabuys import fetch_canadabuys_tenders
-from .rfp_sources_bidscanada import fetch_bidscanada_tenders
-from .rfp_sources_globaltenders import fetch_globaltenders_consultancy
-from .rfp_sources_merx import fetch_merx_tenders, refresh_merx_snapshots
+from rfp_sources_canadabuys import fetch_canadabuys_tenders
+from rfp_sources_bidscanada import fetch_bidscanada_tenders
+from rfp_sources_globaltenders import fetch_globaltenders_consultancy
+from rfp_sources_merx import fetch_merx_tenders, refresh_merx_snapshots
 
 def _env_list(name: str) -> List[str]:
     raw = os.getenv(name, "") or ""

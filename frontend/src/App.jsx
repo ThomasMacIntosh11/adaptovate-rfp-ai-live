@@ -6,8 +6,22 @@ import ProgressBar from "./components/ProgressBar.jsx";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
 const PAGE_SIZE = 100;
+const AUTH_USER = "ADAPTOVATEGrowthCA";
+const AUTH_PASS = "Growth2026!";
+const AUTH_KEY = "adaptovateAuth";
 
 export default function App() {
+  const [authed, setAuthed] = useState(() => {
+    try {
+      return localStorage.getItem(AUTH_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
+  const [loginUser, setLoginUser] = useState("");
+  const [loginPass, setLoginPass] = useState("");
+  const [loginError, setLoginError] = useState("");
+
   const [rfps, setRfps] = useState([]);
   const [saved, setSaved] = useState([]);
   const [detail, setDetail] = useState(null);
@@ -23,6 +37,21 @@ export default function App() {
   const [page, setPage] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
   const [progress, setProgress] = useState({ total: 0, done: 0, stage: "" });
+
+  const handleLogin = (e) => {
+    e.preventDefault();
+    const user = loginUser.trim();
+    const pass = loginPass;
+    if (user === AUTH_USER && pass === AUTH_PASS) {
+      try {
+        localStorage.setItem(AUTH_KEY, "true");
+      } catch { /* ignore */ }
+      setAuthed(true);
+      setLoginError("");
+      return;
+    }
+    setLoginError("Invalid username or password.");
+  };
 
   const loadRfps = async (targetPage = page) => {
     try {
@@ -170,8 +199,14 @@ export default function App() {
     if (!refreshing) setProgress({ total: 0, done: 0, stage: "" });
   }, [refreshing]);
 
-  useEffect(() => { loadRfps(page); }, [page]);
-  useEffect(() => { loadSaved(); }, []);
+  useEffect(() => {
+    if (!authed) return;
+    loadRfps(page);
+  }, [page, authed]);
+  useEffect(() => {
+    if (!authed) return;
+    loadSaved();
+  }, [authed]);
 
   const fetchSavedDetail = async (rfpId) => {
     try {
@@ -224,6 +259,45 @@ export default function App() {
     if (!total || total <= 0) return 0;
     return Math.min(100, Math.max(0, Math.round((done / total) * 100)));
   })();
+
+  if (!authed) {
+    return (
+      <div className="login-wrap">
+        <div className="login-card">
+          <div className="login-header">
+            <h1>ADAPTOVATE RFP Intelligence</h1>
+            <p>Please sign in to continue.</p>
+          </div>
+          <form className="login-form" onSubmit={handleLogin}>
+            <label htmlFor="login-user">Username</label>
+            <input
+              id="login-user"
+              type="text"
+              autoComplete="username"
+              value={loginUser}
+              onChange={(e) => {
+                setLoginUser(e.target.value);
+                if (loginError) setLoginError("");
+              }}
+            />
+            <label htmlFor="login-pass">Password</label>
+            <input
+              id="login-pass"
+              type="password"
+              autoComplete="current-password"
+              value={loginPass}
+              onChange={(e) => {
+                setLoginPass(e.target.value);
+                if (loginError) setLoginError("");
+              }}
+            />
+            {loginError ? <p className="login-error">{loginError}</p> : null}
+            <button className="login-btn" type="submit">Sign In</button>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app-shell">
