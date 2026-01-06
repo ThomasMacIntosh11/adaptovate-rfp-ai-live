@@ -6,3 +6,24 @@ frontend/node_modules/
 __pycache__/
 *.db
 
+# Ignore secrets and local files
+backend/.env
+.env
+
+# Python / backend
+backend/venv/
+backend/__pycache__/
+__pycache__/
+*.pyc
+
+# Data / DB / uploads
+*.db
+backend/rfps.db
+backend/uploads/
+backend/data/
+
+# Frontend
+frontend/node_modules/
+
+# Mac
+.DS_Store
