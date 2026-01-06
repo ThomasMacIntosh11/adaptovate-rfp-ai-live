@@ -1,0 +1,7 @@
+fastapi==0.121.0
+uvicorn==0.38.0
+requests
+beautifulsoup4
+python-dotenv
+sqlalchemy
+pydantic
