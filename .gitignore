@@ -6,3 +6,11 @@ frontend/node_modules/
 __pycache__/
 *.db
 
+backend/venv/
+backend/__pycache__/
+backend/rfps.db
+backend/uploads/
+backend/data/
+frontend/node_modules/
+.DS_Store
+.env
