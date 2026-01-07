@@ -8,7 +8,7 @@ const formatDateLabel = (value) => {
   return String(value).split("T")[0];
 };
 
-export default function RFPCard({ rfp, onSave, saving, onDismiss, dismissing }) {
+export default function RFPCard({ rfp, onSave, saving }) {
   const title = rfp?.title || "Untitled";
   const agency = rfp?.agency || "";
   const url = rfp?.url || "";
@@ -61,11 +61,6 @@ export default function RFPCard({ rfp, onSave, saving, onDismiss, dismissing }) 
         {onSave ? (
           <button onClick={onSave} className="secondary" disabled={saving}>
             {saving ? "Saving…" : "Save RFP"}
-          </button>
-        ) : null}
-        {onDismiss ? (
-          <button onClick={onDismiss} className="danger" disabled={dismissing}>
-            {dismissing ? "Removing…" : "Not interested"}
           </button>
         ) : null}
       </div>

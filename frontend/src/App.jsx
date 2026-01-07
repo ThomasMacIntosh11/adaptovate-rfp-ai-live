@@ -33,7 +33,6 @@ export default function App() {
   const [error, setError] = useState("");
   const [q, setQ] = useState("");
   const [savingId, setSavingId] = useState(null);
-  const [dismissingId, setDismissingId] = useState(null);
 
   const [page, setPage] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
@@ -175,22 +174,6 @@ export default function App() {
       await loadSaved();
     } catch (e) {
       console.error(e);
-    }
-  };
-
-  const handleDismiss = async (rfpId) => {
-    if (!rfpId) return;
-    try {
-      setDismissingId(rfpId);
-      const res = await fetch(`${API_BASE}/rfps/${rfpId}/dismiss`, { method: "POST" });
-      if (!res.ok) throw new Error(`Dismiss failed ${res.status}`);
-      setRfps((prev) => prev.filter((r) => r.id !== rfpId));
-      setTotalCount((prev) => (prev > 0 ? prev - 1 : 0));
-    } catch (e) {
-      console.error(e);
-      setError(e?.message || "Could not dismiss RFP.");
-    } finally {
-      setDismissingId(null);
     }
   };
 
@@ -395,9 +378,7 @@ export default function App() {
                 key={r.id ?? `${r.title}-${r.url}`}
                 rfp={r}
                 onSave={() => handleSave(r.id)}
-                onDismiss={() => handleDismiss(r.id)}
                 saving={savingId === r.id}
-                dismissing={dismissingId === r.id}
               />
             ))}
           </div>
