@@ -158,6 +158,12 @@ def _iso_to_date(value: str) -> Optional[date]:
         except ValueError:
             return None
 
+def _dedupe_key(title: str, agency: str, posted_date: str) -> str:
+    t = (title or "").strip() or "(untitled)"
+    a = (agency or "").strip() or "(agency)"
+    p = (posted_date or "").strip() or "(date)"
+    return f"{t}|{a}|{p}"
+
 # --- progress tracking (in-memory) ---
 from threading import Lock
 PROGRESS = {"total": 0, "done": 0, "stage": ""}
@@ -181,7 +187,6 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        "https://rfp-intelligence.onrender.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -272,6 +277,19 @@ def _ensure_schema(conn: sqlite3.Connection):
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS hidden_rfps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dedupe_key TEXT UNIQUE,
+                title TEXT,
+                agency TEXT,
+                posted_date TEXT,
+                url TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
             UPDATE rfps
             SET dedupe_key = CASE
                 WHEN TRIM(IFNULL(title, '')) = '' AND TRIM(IFNULL(agency, '')) = '' AND TRIM(IFNULL(posted_date, '')) = ''
@@ -296,6 +314,14 @@ def _conn():
     conn.row_factory = sqlite3.Row
     _ensure_schema(conn)
     return conn
+
+def _load_hidden_keys() -> set:
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("SELECT dedupe_key FROM hidden_rfps")
+    keys = {row[0] for row in cur.fetchall() if row and row[0]}
+    conn.close()
+    return keys
 
 def _saved_folder(saved_id: int) -> str:
     folder = os.path.join(UPLOAD_DIR, f"saved_{saved_id}")
@@ -350,16 +376,17 @@ def list_rfps(
     cur = conn.cursor()
     due_clause = "(due_date IS NULL OR due_date = '' OR date(due_date) >= date('now'))"
     recent_clause = "(date(posted_date) >= date('now', '-60 days'))"
+    hidden_clause = "dedupe_key NOT IN (SELECT dedupe_key FROM hidden_rfps)"
 
     # total count (for pagination header)
     if q.strip():
         like = f"%{q.strip()}%"
         cur.execute(
-            f"SELECT COUNT(*) FROM rfps WHERE {due_clause} AND {recent_clause} AND (title LIKE ? OR summary LIKE ? OR agency LIKE ?)",
+            f"SELECT COUNT(*) FROM rfps WHERE {due_clause} AND {recent_clause} AND {hidden_clause} AND (title LIKE ? OR summary LIKE ? OR agency LIKE ?)",
             (like, like, like),
         )
     else:
-        cur.execute(f"SELECT COUNT(*) FROM rfps WHERE {due_clause} AND {recent_clause}")
+        cur.execute(f"SELECT COUNT(*) FROM rfps WHERE {due_clause} AND {recent_clause} AND {hidden_clause}")
     total = int(cur.fetchone()[0])
     if response is not None:
         response.headers["X-Total-Count"] = str(total)
@@ -370,7 +397,7 @@ def list_rfps(
             f"""
             SELECT id, title, agency, summary, description, url, score, posted_date, due_date, created_at
             FROM rfps
-            WHERE {due_clause} AND {recent_clause} AND (title LIKE ? OR summary LIKE ? OR agency LIKE ?)
+            WHERE {due_clause} AND {recent_clause} AND {hidden_clause} AND (title LIKE ? OR summary LIKE ? OR agency LIKE ?)
             ORDER BY score DESC,
                      datetime(posted_date) DESC,
                      datetime(created_at) DESC
@@ -383,7 +410,7 @@ def list_rfps(
             f"""
             SELECT id, title, agency, summary, description, url, score, posted_date, due_date, created_at
             FROM rfps
-            WHERE {due_clause} AND {recent_clause}
+            WHERE {due_clause} AND {recent_clause} AND {hidden_clause}
             ORDER BY score DESC,
                      datetime(posted_date) DESC,
                      datetime(created_at) DESC
@@ -536,6 +563,47 @@ def save_rfp_item(rfp_id: int, payload: SaveRequest):
     conn.close()
     return saved
 
+@app.post("/rfps/{rfp_id}/dismiss")
+def dismiss_rfp(rfp_id: int):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, title, agency, posted_date, url, dedupe_key
+        FROM rfps
+        WHERE id=?
+        """,
+        (rfp_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="RFP not found")
+    record = dict(row)
+    title = record.get("title", "")
+    agency = record.get("agency", "")
+    posted_date = _format_posted_date(record.get("posted_date", ""))
+    url = record.get("url", "")
+    dedupe_key = record.get("dedupe_key") or _dedupe_key(title, agency, posted_date)
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO hidden_rfps(dedupe_key, title, agency, posted_date, url, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            dedupe_key,
+            title,
+            agency,
+            posted_date,
+            url,
+            datetime.utcnow().isoformat(timespec="seconds"),
+        ),
+    )
+    cur.execute("DELETE FROM rfps WHERE id=?", (rfp_id,))
+    conn.commit()
+    conn.close()
+    return {"dismissed": True, "rfp_id": rfp_id}
+
 @app.delete("/saved/{rfp_id}")
 def delete_saved_rfp(rfp_id: int):
     conn = _conn()
@@ -640,6 +708,7 @@ def refresh_rfps(limit: int = 300, no_ai: bool = False):
     ALPHA = float(os.getenv("RELEVANCE_ALPHA", "0.6"))
     MIN_RULE_SCORE = float(os.getenv("MIN_RULE_SCORE", "40"))
     today = date.today()
+    hidden_keys = _load_hidden_keys()
 
     normalized_items = []
     for it in items:
@@ -648,14 +717,12 @@ def refresh_rfps(limit: int = 300, no_ai: bool = False):
         due_dt = _iso_to_date(it.get("due_date"))
         if due_dt and due_dt < today:
             continue
+        dedupe_key = _dedupe_key(it.get("title", ""), it.get("agency", ""), it.get("posted_date", ""))
+        if dedupe_key in hidden_keys:
+            continue
+        it["_dedupe_key"] = dedupe_key
         normalized_items.append(it)
     items = normalized_items
-
-    def _dedupe_key(title: str, agency: str, posted_date: str) -> str:
-        t = (title or "").strip() or "(untitled)"
-        a = (agency or "").strip() or "(agency)"
-        p = (posted_date or "").strip() or "(date)"
-        return f"{t}|{a}|{p}"
 
     def _upsert(row: dict):
         conn = _conn()
