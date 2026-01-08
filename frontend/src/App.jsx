@@ -33,6 +33,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [q, setQ] = useState("");
   const [savingId, setSavingId] = useState(null);
+  const [excludingId, setExcludingId] = useState(null);
 
   const [page, setPage] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
@@ -124,6 +125,22 @@ export default function App() {
       setError(e?.message || "Could not save RFP.");
     } finally {
       setSavingId(null);
+    }
+  };
+
+  const handleExclude = async (rfpId) => {
+    try {
+      setExcludingId(rfpId);
+      setError("");
+      const res = await fetch(`${API_BASE}/rfps/${rfpId}/exclude`, { method: "POST" });
+      if (!res.ok) throw new Error(`Exclude failed ${res.status}`);
+      setRfps((prev) => prev.filter((r) => r.id !== rfpId));
+      setTotalCount((count) => Math.max(0, count - 1));
+    } catch (e) {
+      console.error(e);
+      setError(e?.message || "Could not mark as not interested.");
+    } finally {
+      setExcludingId(null);
     }
   };
 
@@ -379,6 +396,8 @@ export default function App() {
                 rfp={r}
                 onSave={() => handleSave(r.id)}
                 saving={savingId === r.id}
+                onNotInterested={() => handleExclude(r.id)}
+                excluding={excludingId === r.id}
               />
             ))}
           </div>

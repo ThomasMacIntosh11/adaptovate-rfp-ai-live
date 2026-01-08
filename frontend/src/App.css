@@ -122,6 +122,9 @@ h1 { margin: 0 0 16px; font-size: 40px; letter-spacing: .2px; }
 .card-actions .muted { background: #e5e7eb; border: none; color: #111827; padding: 10px 14px; border-radius: 10px; cursor: not-allowed; }
 .card-actions .secondary { border: 1px solid var(--border); background: #fff; color: var(--text); padding: 10px 14px; border-radius: 10px; cursor: pointer; }
 .card-actions .secondary:hover { background: #f8fafc; }
+.card-actions .danger { border: 1px solid #ef4444; background: #fff; color: #b91c1c; padding: 10px 14px; border-radius: 10px; cursor: pointer; }
+.card-actions .danger:hover { background: #fef2f2; }
+.card-actions .danger:disabled { opacity: 0.6; cursor: not-allowed; }
 
 /* error / empty */
 .error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 12px; border-radius: 10px; margin-bottom: 12px; }

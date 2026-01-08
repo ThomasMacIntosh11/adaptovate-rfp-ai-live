@@ -47,6 +47,12 @@ def _format_tag_label(term: str) -> str:
             formatted.append(tok[0].upper() + tok[1:])
     return " ".join(formatted)
 
+def _build_dedupe_key(title: str, agency: str, posted_date: str) -> str:
+    t = (title or "").strip() or "(untitled)"
+    a = (agency or "").strip() or "(agency)"
+    p = (posted_date or "").strip() or "(date)"
+    return f"{t}|{a}|{p}"
+
 def _load_focus_terms():
     seen = set()
     ordered = []
@@ -273,6 +279,19 @@ def _ensure_schema(conn: sqlite3.Connection):
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS excluded_rfps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rfp_id INTEGER UNIQUE,
+                dedupe_key TEXT NOT NULL DEFAULT '',
+                title TEXT,
+                agency TEXT,
+                posted_date TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
             UPDATE rfps
             SET dedupe_key = CASE
                 WHEN TRIM(IFNULL(title, '')) = '' AND TRIM(IFNULL(agency, '')) = '' AND TRIM(IFNULL(posted_date, '')) = ''
@@ -351,16 +370,21 @@ def list_rfps(
     cur = conn.cursor()
     due_clause = "(due_date IS NULL OR due_date = '' OR date(due_date) >= date('now'))"
     recent_clause = "(date(posted_date) >= date('now', '-60 days'))"
+    exclude_clause = (
+        "NOT EXISTS (SELECT 1 FROM excluded_rfps e "
+        "WHERE e.rfp_id = rfps.id "
+        "OR (e.dedupe_key <> '' AND e.dedupe_key = rfps.dedupe_key))"
+    )
 
     # total count (for pagination header)
     if q.strip():
         like = f"%{q.strip()}%"
         cur.execute(
-            f"SELECT COUNT(*) FROM rfps WHERE {due_clause} AND {recent_clause} AND (title LIKE ? OR summary LIKE ? OR agency LIKE ?)",
+            f"SELECT COUNT(*) FROM rfps WHERE {due_clause} AND {recent_clause} AND {exclude_clause} AND (title LIKE ? OR summary LIKE ? OR agency LIKE ?)",
             (like, like, like),
         )
     else:
-        cur.execute(f"SELECT COUNT(*) FROM rfps WHERE {due_clause} AND {recent_clause}")
+        cur.execute(f"SELECT COUNT(*) FROM rfps WHERE {due_clause} AND {recent_clause} AND {exclude_clause}")
     total = int(cur.fetchone()[0])
     if response is not None:
         response.headers["X-Total-Count"] = str(total)
@@ -371,7 +395,7 @@ def list_rfps(
             f"""
             SELECT id, title, agency, summary, description, url, score, posted_date, due_date, created_at
             FROM rfps
-            WHERE {due_clause} AND {recent_clause} AND (title LIKE ? OR summary LIKE ? OR agency LIKE ?)
+            WHERE {due_clause} AND {recent_clause} AND {exclude_clause} AND (title LIKE ? OR summary LIKE ? OR agency LIKE ?)
             ORDER BY score DESC,
                      datetime(posted_date) DESC,
                      datetime(created_at) DESC
@@ -384,7 +408,7 @@ def list_rfps(
             f"""
             SELECT id, title, agency, summary, description, url, score, posted_date, due_date, created_at
             FROM rfps
-            WHERE {due_clause} AND {recent_clause}
+            WHERE {due_clause} AND {recent_clause} AND {exclude_clause}
             ORDER BY score DESC,
                      datetime(posted_date) DESC,
                      datetime(created_at) DESC
@@ -405,6 +429,54 @@ def list_rfps(
         row["focus_tags"] = _extract_focus_tags(haystack)
     conn.close()
     return rows
+
+@app.post("/rfps/{rfp_id}/exclude")
+def exclude_rfp_item(rfp_id: int):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, title, agency, posted_date, dedupe_key
+        FROM rfps
+        WHERE id=?
+        """,
+        (rfp_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="RFP not found")
+    record = dict(row)
+    dedupe_key = (record.get("dedupe_key") or "").strip()
+    if not dedupe_key:
+        dedupe_key = _build_dedupe_key(
+            record.get("title", ""),
+            record.get("agency", ""),
+            record.get("posted_date", ""),
+        )
+    cur.execute(
+        """
+        INSERT INTO excluded_rfps(rfp_id, dedupe_key, title, agency, posted_date, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(rfp_id) DO UPDATE SET
+            dedupe_key=excluded.dedupe_key,
+            title=excluded.title,
+            agency=excluded.agency,
+            posted_date=excluded.posted_date,
+            created_at=excluded.created_at
+        """,
+        (
+            rfp_id,
+            dedupe_key,
+            record.get("title", ""),
+            record.get("agency", ""),
+            record.get("posted_date", ""),
+            datetime.utcnow().isoformat(timespec="seconds"),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return {"excluded": True, "rfp_id": rfp_id}
 
 @app.get("/saved")
 def list_saved():
@@ -652,12 +724,6 @@ def refresh_rfps(limit: int = 300, no_ai: bool = False):
         normalized_items.append(it)
     items = normalized_items
 
-    def _dedupe_key(title: str, agency: str, posted_date: str) -> str:
-        t = (title or "").strip() or "(untitled)"
-        a = (agency or "").strip() or "(agency)"
-        p = (posted_date or "").strip() or "(date)"
-        return f"{t}|{a}|{p}"
-
     def _upsert(row: dict):
         conn = _conn()
         cur = conn.cursor()
@@ -671,7 +737,7 @@ def refresh_rfps(limit: int = 300, no_ai: bool = False):
         url_raw = (row.get("url") or "").strip()
         url_value = url_raw if url_raw else None
         score = float(row.get("score", 0.0))
-        dedupe_key = _dedupe_key(title, agency, posted_date)
+        dedupe_key = _build_dedupe_key(title, agency, posted_date)
         created_at = datetime.utcnow().isoformat(timespec="seconds")
 
         cur.execute(
