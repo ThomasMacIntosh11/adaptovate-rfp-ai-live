@@ -9,7 +9,9 @@ import requests
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://www.tendersontime.com"
-DEFAULT_LISTING_URL = f"{BASE_URL}/consultancy-tenders/"
+DEFAULT_CANADA_URL = f"{BASE_URL}/canada-tenders/consultancy-tenders/"
+DEFAULT_USA_URL = f"{BASE_URL}/usa-tenders/consultancy-tenders/"
+SEARCH_ENDPOINT = f"{BASE_URL}/ApiTenders/getfilterTender"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -50,6 +52,11 @@ AGENCY_LABELS = [
 COUNTRY_LABELS = ["country", "location", "region"]
 POSTED_LABELS = ["published", "posted", "posting", "issue date", "publish date", "tender notice issue date"]
 DUE_LABELS = ["closing", "closing date", "deadline", "submission date", "bid closing", "last date", "due date", "closing time"]
+
+ALLOWED_COUNTRY_PATTERN = re.compile(
+    r"\b(?:canada|united states(?: of america)?|u\.s\.a\.?|u\.s\.?|usa)(?=\W|$)",
+    re.I,
+)
 
 def _clean(text: Optional[str]) -> str:
     if not text:
@@ -170,10 +177,45 @@ def _normalize_item(
         "description": desc,
         "url": url,
         "agency": agency,
+        "country": country or "",
         "category": "Consultancy",
         "posted_date": posted,
         "due_date": due,
     }
+
+def _normalize_search_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    title = _clean(row.get("Tender_Summery") or row.get("Tender_Summary") or "")
+    url = _clean(row.get("Tender_url") or row.get("Tender_URL") or "")
+    country = _clean(row.get("Country_Name_Known") or row.get("Country_Name") or "")
+    posted = _format_date(_clean(row.get("Posting_Date") or ""))
+    due = _format_date(_clean(row.get("Bid_Deadline_1") or row.get("Bid_Deadline") or ""))
+    value = _clean(row.get("Tender_Value") or "")
+
+    description_parts = []
+    if country:
+        description_parts.append(f"Country: {country}")
+    if value:
+        description_parts.append(f"Value: {value}")
+    description = " | ".join(description_parts)
+
+    return _normalize_item(
+        title=title or "TendersOnTime listing",
+        url=url,
+        agency=country or "TendersOnTime",
+        country=country,
+        posted=posted,
+        due=due,
+        description=description,
+    )
+
+def _is_allowed_country(item: Dict[str, Any]) -> bool:
+    hay = " ".join([
+        item.get("country", ""),
+        item.get("agency", ""),
+        item.get("description", ""),
+        item.get("title", ""),
+    ])
+    return bool(ALLOWED_COUNTRY_PATTERN.search(hay))
 
 def _pick_link(node) -> Tuple[str, str]:
     link_nodes = node.find_all("a", href=True)
@@ -191,7 +233,7 @@ def _pick_link(node) -> Tuple[str, str]:
             return text, href
     return "", ""
 
-def _parse_table(soup: BeautifulSoup, base_url: str) -> List[Dict[str, Any]]:
+def _parse_table(soup: BeautifulSoup, base_url: str, default_country: str) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     for table in soup.find_all("table"):
         headers = [_clean(th.get_text()) for th in table.find_all("th")]
@@ -225,6 +267,8 @@ def _parse_table(soup: BeautifulSoup, base_url: str) -> List[Dict[str, Any]]:
             due = _format_date(due_raw) if due_raw else ""
 
             agency, country = _extract_common_fields("", [], pairs)
+            if not country:
+                country = default_country
             description_parts = []
             if country:
                 description_parts.append(f"Country: {country}")
@@ -239,10 +283,10 @@ def _parse_table(soup: BeautifulSoup, base_url: str) -> List[Dict[str, Any]]:
             items.append(_normalize_item(title, url, agency, country, posted, due, description))
     return items
 
-def _parse_cards(soup: BeautifulSoup, base_url: str) -> List[Dict[str, Any]]:
+def _parse_cards(soup: BeautifulSoup, base_url: str, default_country: str) -> List[Dict[str, Any]]:
     selectors = [
         ".tender", ".tender-item", ".tender-card", ".tender-row", ".tender-block",
-        ".search-result", ".search-item", ".result-item", ".listing-box", ".tender-listing",
+        ".search-result", ".search-item", ".result-item", ".listing-box", ".listingbox", ".tender-listing",
     ]
     candidates = []
     for selector in selectors:
@@ -265,6 +309,8 @@ def _parse_cards(soup: BeautifulSoup, base_url: str) -> List[Dict[str, Any]]:
         pairs = _extract_pairs(lines)
 
         agency, country = _extract_common_fields(raw_text, lines, pairs)
+        if not country:
+            country = default_country
         posted, due = _extract_dates(raw_text, lines, pairs)
 
         snippet = ""
@@ -281,6 +327,79 @@ def _parse_cards(soup: BeautifulSoup, base_url: str) -> List[Dict[str, Any]]:
         description = " | ".join(description_parts)
 
         items.append(_normalize_item(title, url, agency, country, posted, due, description))
+
+    return items
+
+def _default_country_from_url(url: str) -> str:
+    lower = (url or "").lower()
+    if "/canada-tenders/" in lower:
+        return "Canada"
+    if "/usa-tenders/" in lower or "/united-states-of-america-tenders/" in lower:
+        return "United States"
+    return ""
+
+def _build_base_urls() -> List[str]:
+    raw = (os.getenv("TENDERS_ONTIME_URLS") or "").strip()
+    if raw:
+        return [u.strip() for u in raw.split(",") if u.strip()]
+    single = (os.getenv("TENDERS_ONTIME_URL") or "").strip()
+    if single:
+        return [single]
+    return [DEFAULT_CANADA_URL, DEFAULT_USA_URL]
+
+def fetch_tendersontime_keyword_search(
+    keywords: List[str],
+    max_pages: int = 3,
+    per_page: int = 50,
+    keyword_limit: int = 12,
+) -> List[Dict[str, Any]]:
+    """
+    Search TendersOnTime using keyword queries against the advanced search API.
+    """
+    if not keywords:
+        return []
+    terms = [k.strip() for k in keywords if k and k.strip()]
+    if not terms:
+        return []
+    terms = terms[: max(1, keyword_limit)]
+
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    items: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+
+    for term in terms:
+        for page in range(1, max_pages + 1):
+            payload = {
+                "tendersaction": "FilterTenders",
+                "keyword": term,
+                "startpage": str(page),
+                "per_page": str(per_page),
+                "order_by": "Posting_Date DESC",
+                "searchType": "1",
+                "mainsearch": "",
+            }
+            resp = session.post(SEARCH_ENDPOINT, data=payload, timeout=60)
+            resp.raise_for_status()
+            try:
+                data = resp.json()
+            except ValueError:
+                break
+            rows = data.get("searchdata") or []
+            if not rows:
+                break
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                item = _normalize_search_row(row)
+                if not _is_allowed_country(item):
+                    continue
+                key = item.get("url") or f"{item.get('title')}|{item.get('agency')}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                items.append(item)
 
     return items
 
@@ -310,39 +429,45 @@ def _find_next_url(soup: BeautifulSoup, current_url: str) -> str:
 def fetch_tendersontime_consultancy(max_pages: int = 0) -> List[Dict[str, Any]]:
     """
     Scrape consultancy tenders from TendersOnTime.
-    Uses TENDERS_ONTIME_URL (default global consultancy listing).
+    Uses TENDERS_ONTIME_URLS (comma-separated) or TENDERS_ONTIME_URL;
+    defaults to Canada + USA consultancy listings.
     """
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    base_url = (os.getenv("TENDERS_ONTIME_URL") or DEFAULT_LISTING_URL).strip() or DEFAULT_LISTING_URL
     items: List[Dict[str, Any]] = []
     seen: Set[str] = set()
-    visited: Set[str] = set()
-    next_url = base_url
-    pages = 0
+    base_urls = _build_base_urls()
 
-    while next_url and next_url not in visited:
-        visited.add(next_url)
-        resp = session.get(next_url, timeout=60)
-        resp.raise_for_status()
-        html = resp.text
-        soup = BeautifulSoup(html, "html.parser")
+    for base_url in base_urls:
+        visited: Set[str] = set()
+        next_url = base_url
+        pages = 0
+        default_country = _default_country_from_url(base_url)
 
-        page_items = _parse_table(soup, next_url)
-        if not page_items:
-            page_items = _parse_cards(soup, next_url)
+        while next_url and next_url not in visited:
+            visited.add(next_url)
+            resp = session.get(next_url, timeout=60)
+            resp.raise_for_status()
+            html = resp.text
+            soup = BeautifulSoup(html, "html.parser")
 
-        for item in page_items:
-            key = item.get("url") or f"{item.get('title')}|{item.get('agency')}"
-            if key in seen:
-                continue
-            seen.add(key)
-            items.append(item)
+            page_items = _parse_table(soup, next_url, default_country)
+            if not page_items:
+                page_items = _parse_cards(soup, next_url, default_country)
 
-        pages += 1
-        if max_pages and pages >= max_pages:
-            break
-        next_url = _find_next_url(soup, next_url)
+            for item in page_items:
+                if not _is_allowed_country(item):
+                    continue
+                key = item.get("url") or f"{item.get('title')}|{item.get('agency')}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                items.append(item)
+
+            pages += 1
+            if max_pages and pages >= max_pages:
+                break
+            next_url = _find_next_url(soup, next_url)
 
     return items

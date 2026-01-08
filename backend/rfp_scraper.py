@@ -7,7 +7,10 @@ from rfp_sources_canadabuys import fetch_canadabuys_tenders
 from rfp_sources_bidscanada import fetch_bidscanada_tenders
 from rfp_sources_globaltenders import fetch_globaltenders_consultancy
 from rfp_sources_merx import fetch_merx_tenders, refresh_merx_snapshots
-from rfp_sources_tendersontime import fetch_tendersontime_consultancy
+from rfp_sources_tendersontime import (
+    fetch_tendersontime_consultancy,
+    fetch_tendersontime_keyword_search,
+)
 
 def _env_list(name: str) -> List[str]:
     raw = os.getenv(name, "") or ""
@@ -168,6 +171,30 @@ def scrape_real_rfps(limit: int = 300) -> List[Dict[str, Any]]:
             items.extend(tot_items)
         except Exception as e:
             print(f"[TENDERSONTIME] failed: {type(e).__name__}: {e}")
+
+    enable_tendersontime_search = os.getenv("ENABLE_TENDERS_ONTIME_SEARCH", "true").strip().lower() != "false"
+    if enable_tendersontime_search:
+        try:
+            search_pages = int(os.getenv("TENDERS_ONTIME_SEARCH_MAX_PAGES", "5"))
+            per_page = int(os.getenv("TENDERS_ONTIME_SEARCH_PER_PAGE", "50"))
+            keyword_limit = int(os.getenv("TENDERS_ONTIME_KEYWORD_LIMIT", "12"))
+        except ValueError:
+            search_pages, per_page, keyword_limit = 5, 50, 12
+        try:
+            search_terms = _env_list("FILTER_KEYWORDS")
+            tot_search_items = fetch_tendersontime_keyword_search(
+                search_terms,
+                max_pages=search_pages,
+                per_page=per_page,
+                keyword_limit=keyword_limit,
+            )
+            for it in tot_search_items:
+                it["_source"] = "TendersOnTimeSearch"
+                it["_force_unspsc_pass"] = True
+                it["_force_keyword_pass"] = True
+            items.extend(tot_search_items)
+        except Exception as e:
+            print(f"[TENDERSONTIME_SEARCH] failed: {type(e).__name__}: {e}")
 
     # 2) UNSPSC filter
     unspsc_targets = [u.strip().lower() for u in (_env_list("FILTER_UNSPSC"))]
