@@ -7,6 +7,7 @@ from rfp_sources_canadabuys import fetch_canadabuys_tenders
 from rfp_sources_bidscanada import fetch_bidscanada_tenders
 from rfp_sources_globaltenders import fetch_globaltenders_consultancy
 from rfp_sources_merx import fetch_merx_tenders, refresh_merx_snapshots
+from rfp_sources_tendersontime import fetch_tendersontime_consultancy
 
 def _env_list(name: str) -> List[str]:
     raw = os.getenv(name, "") or ""
@@ -85,7 +86,7 @@ def _keyword_match(item: Dict[str, Any], keywords: List[str], strict: bool, fall
 def scrape_real_rfps(limit: int = 300) -> List[Dict[str, Any]]:
     """
     New pipeline:
-      1) Scrape (fast, CSV only) -> include UNSPSC fields when present
+      1) Scrape sources -> include UNSPSC fields when present
       2) Filter by UNSPSC list from .env (FILTER_UNSPSC)
       3) Then filter by FILTER_KEYWORDS (enforced)
       4) Return results (newest-first from source)
@@ -152,6 +153,22 @@ def scrape_real_rfps(limit: int = 300) -> List[Dict[str, Any]]:
         except Exception as e:
             print(f"[GLOBALTENDERS] failed: {type(e).__name__}: {e}")
 
+    enable_tendersontime = os.getenv("ENABLE_TENDERS_ONTIME", "true").strip().lower() != "false"
+    if enable_tendersontime:
+        try:
+            max_pages = int(os.getenv("TENDERS_ONTIME_MAX_PAGES", "2"))
+        except ValueError:
+            max_pages = 2
+        try:
+            tot_items = fetch_tendersontime_consultancy(max_pages=max_pages)
+            for it in tot_items:
+                it["_source"] = "TendersOnTime"
+                it["_force_unspsc_pass"] = True
+                it["_require_keyword_match"] = True
+            items.extend(tot_items)
+        except Exception as e:
+            print(f"[TENDERSONTIME] failed: {type(e).__name__}: {e}")
+
     # 2) UNSPSC filter
     unspsc_targets = [u.strip().lower() for u in (_env_list("FILTER_UNSPSC"))]
     if unspsc_targets:
@@ -175,6 +192,8 @@ def scrape_real_rfps(limit: int = 300) -> List[Dict[str, Any]]:
     # Per your request, enforce keywords after UNSPSC regardless of strict flag.
     if keywords or FOCUS_PATTERNS:
         def _passes_keywords(it):
+            if it.get("_require_keyword_match"):
+                return _keyword_match(it, keywords, strict=True, fallback_patterns=FOCUS_PATTERNS)
             if it.get("_force_keyword_pass"):
                 return True
             if _keyword_match(it, keywords, strict=True, fallback_patterns=FOCUS_PATTERNS):

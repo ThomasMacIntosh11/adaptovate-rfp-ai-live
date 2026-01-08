@@ -692,7 +692,7 @@ def add_saved_note(rfp_id: int, payload: NoteRequest):
 def refresh_rfps(limit: int = 300, no_ai: bool = False):
     """
     Workflow:
-      1) Scrape CanadaBuys (CSV only, includes UNSPSC when present)
+      1) Scrape sources (CanadaBuys, MERX, bidsCanada, GlobalTenders, TendersOnTime)
       2) UNSPSC filter (FILTER_UNSPSC)
       3) Keyword filter (FILTER_KEYWORDS)
       4) Score + (optional) AI summary; insert into DB
