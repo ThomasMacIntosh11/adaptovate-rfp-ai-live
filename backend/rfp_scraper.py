@@ -156,9 +156,9 @@ def scrape_real_rfps(limit: int = 300) -> List[Dict[str, Any]]:
     enable_tendersontime = os.getenv("ENABLE_TENDERS_ONTIME", "true").strip().lower() != "false"
     if enable_tendersontime:
         try:
-            max_pages = int(os.getenv("TENDERS_ONTIME_MAX_PAGES", "2"))
+            max_pages = int(os.getenv("TENDERS_ONTIME_MAX_PAGES", "20"))
         except ValueError:
-            max_pages = 2
+            max_pages = 20
         try:
             tot_items = fetch_tendersontime_consultancy(max_pages=max_pages)
             for it in tot_items:
