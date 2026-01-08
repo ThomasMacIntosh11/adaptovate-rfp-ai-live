@@ -130,7 +130,7 @@ def compute_rule_score(item: Dict[str, Any]) -> float:
         "ai strategy", "ai roadmap", "agile operating model", "operating model implementation",
         "quarterly delivery", "business process improvement", "process optimization",
         "transformation office", "culture transformation", "chatbot development",
-        "conversational ai", "automation strategy", "agile transformation",
+        "conversational ai", "automation strategy", "agile transformation", "agility",
     ]
     core_hits = _token_hits(text, core_focus_terms)
     core_title_hits = _token_hits(title, core_focus_terms)
