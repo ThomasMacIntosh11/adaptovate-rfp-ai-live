@@ -14,7 +14,8 @@ from dotenv import load_dotenv
 
 from rfp_scraper import scrape_real_rfps
 from relevance import compute_rule_score
-from ai_utils import summarize_rfp, score_relevance, structured_summary, strategic_insights
+from ai_utils import summarize_rfp, score_relevance, refine_relevance_score, structured_summary, strategic_insights
+from email_digest import run_digest
 
 # Always load env from backend folder
 BASE_DIR = os.path.dirname(__file__)
@@ -354,10 +355,47 @@ class SaveRequest(BaseModel):
 class NoteRequest(BaseModel):
     note: str
 
+class DigestRequest(BaseModel):
+    since: Optional[str] = None
+    threshold: Optional[float] = None
+    dry_run: bool = False
+    no_state_update: bool = False
+    lookback_hours: Optional[int] = None
+    max_items: Optional[int] = None
+    force_send: bool = False
+
+class DigestResponse(BaseModel):
+    sent: bool
+    count: int
+    since: str
+    subject: str
+    recipients: str
+    from_email: str
+    body: Optional[str] = None
+
 @app.get("/progress")
 def get_progress():
     with PROGRESS_LOCK:
         return dict(PROGRESS)
+
+@app.post("/digest/send", response_model=DigestResponse)
+def send_digest(payload: DigestRequest):
+    try:
+        return run_digest(
+            since=payload.since,
+            threshold=payload.threshold,
+            dry_run=payload.dry_run,
+            no_state_update=payload.no_state_update,
+            lookback_hours=payload.lookback_hours,
+            max_items=payload.max_items,
+            force_send=payload.force_send,
+            include_body=payload.dry_run,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"digest error: {type(exc).__name__}: {exc}",
+        )
 
 @app.get("/rfps")
 def list_rfps(
@@ -825,6 +863,17 @@ def refresh_rfps(limit: int = 300, no_ai: bool = False):
                     summary = ""
 
             final_score = rule_score if no_ai else (ALPHA * rule_score + (1 - ALPHA) * ai_score)
+            if not no_ai:
+                try:
+                    refined = refine_relevance_score(
+                        rfp_text,
+                        base_score=final_score,
+                        rule_score=rule_score,
+                        ai_score=ai_score,
+                    )
+                    final_score = float(refined.get("score", final_score))
+                except Exception as e:
+                    errors.append(f"refine item {idx}: {type(e).__name__}: {e}")
             row = {
                 "title": title,
                 "agency": agency,

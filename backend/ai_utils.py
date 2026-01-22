@@ -12,6 +12,7 @@ except Exception:
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPEN_AI_RELEVANCE_MODEL = os.getenv("OPEN_AI_RELEVANCE_MODEL", OPENAI_MODEL)
 
 def _get_client() -> OpenAI:
     """
@@ -21,6 +22,17 @@ def _get_client() -> OpenAI:
     if not api_key or api_key.lower() == "none":
         raise RuntimeError(
             "OPENAI_API_KEY is not set. Update backend/.env or export it in your shell."
+        )
+    return OpenAI(api_key=api_key)
+
+def _get_relevance_client() -> OpenAI:
+    """
+    Lazy-init OpenAI client for relevance refinement using a dedicated key.
+    """
+    api_key = os.getenv("OPEN_AI_RELEVANCE_KEY", "").strip()
+    if not api_key or api_key.lower() == "none":
+        raise RuntimeError(
+            "OPEN_AI_RELEVANCE_KEY is not set. Update backend/.env or export it in your shell."
         )
     return OpenAI(api_key=api_key)
 
@@ -84,6 +96,50 @@ def score_relevance(rfp_text: str) -> Dict[str, int]:
         return {"score": sc, "rationale": str(data.get("rationale", ""))[:400]}
     except Exception as e:
         return {"score": 0, "rationale": f"model error: {type(e).__name__}: {e}"}
+
+def refine_relevance_score(
+    rfp_text: str,
+    base_score: float,
+    rule_score: float | None = None,
+    ai_score: float | None = None,
+) -> Dict[str, int]:
+    """
+    Return {'score': 0..100, 'rationale': '...'} refined from an existing score.
+    """
+    client = _get_relevance_client()
+    prompt = (
+        "You are a relevance scoring validator for ADAPTOVATE. "
+        "Given the RFP text and the system's current score, return an adjusted score "
+        "(0-100 integer) and a short rationale. Use the current score as a starting "
+        "point and adjust modestly (+/- up to 25) unless there is strong evidence. "
+        "Return ONLY a JSON object with fields: score (0-100 integer) and rationale (short string).\n\n"
+        f"CURRENT_SCORE: {base_score}\n"
+        f"RULE_SCORE: {rule_score if rule_score is not None else 'n/a'}\n"
+        f"AI_SCORE: {ai_score if ai_score is not None else 'n/a'}\n"
+        f"TEXT:\n{rfp_text}\n"
+    )
+    try:
+        resp = client.responses.create(
+            model=OPEN_AI_RELEVANCE_MODEL,
+            input=[
+                {"role": "system", "content": "You are a disciplined evaluator. Output JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        raw = resp.output_text if hasattr(resp, "output_text") else ""
+        if not raw and hasattr(resp, "choices"):
+            raw = resp.choices[0].message.content or ""
+
+        import json, re
+        m = re.search(r"\{.*\}", raw, re.S)
+        if not m:
+            return {"score": int(round(base_score)), "rationale": "No JSON found from model output."}
+        data = json.loads(m.group(0))
+        sc = int(data.get("score", int(round(base_score))))
+        sc = max(0, min(100, sc))
+        return {"score": sc, "rationale": str(data.get("rationale", ""))[:400]}
+    except Exception as e:
+        return {"score": int(round(base_score)), "rationale": f"model error: {type(e).__name__}: {e}"}
 
 def structured_summary(rfp_text: str) -> str:
     """
