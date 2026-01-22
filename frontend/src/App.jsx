@@ -34,6 +34,9 @@ export default function App() {
   const [q, setQ] = useState("");
   const [savingId, setSavingId] = useState(null);
   const [excludingId, setExcludingId] = useState(null);
+  const [adjustingId, setAdjustingId] = useState(null);
+  const [trainingId, setTrainingId] = useState(null);
+  const [savedOpen, setSavedOpen] = useState(true);
 
   const [page, setPage] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
@@ -141,6 +144,60 @@ export default function App() {
       setError(e?.message || "Could not mark as not interested.");
     } finally {
       setExcludingId(null);
+    }
+  };
+
+  const handleAdjust = async (rfpId, direction) => {
+    const target = rfps.find((r) => r.id === rfpId);
+    const previousFeedback = target?.user_feedback ?? null;
+    const previousScore = typeof target?.score === "number" ? target.score : 0;
+    const delta = direction === "up" ? 1 : -1;
+    const optimisticScore = Math.max(0, Math.min(100, previousScore + delta));
+    try {
+      setAdjustingId(rfpId);
+      setRfps((prev) => prev.map((r) => (
+        r.id === rfpId ? { ...r, user_feedback: direction, score: optimisticScore } : r
+      )));
+      const res = await fetch(`${API_BASE}/rfps/${rfpId}/adjust`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ direction }),
+      });
+      if (!res.ok) throw new Error(`Adjust failed ${res.status}`);
+      const data = await res.json();
+      setRfps((prev) => prev.map((r) => {
+        if (r.id !== rfpId) return r;
+        const next = { ...r, user_feedback: direction };
+        if (typeof data?.score === "number") next.score = data.score;
+        return next;
+      }));
+    } catch (e) {
+      console.error(e);
+      setError(e?.message || "Could not adjust score.");
+      setRfps((prev) => prev.map((r) => {
+        if (r.id !== rfpId) return r;
+        const next = { ...r, user_feedback: previousFeedback, score: previousScore };
+        return next;
+      }));
+    } finally {
+      setAdjustingId(null);
+    }
+  };
+
+  const handleTrain = async (rfpId) => {
+    try {
+      setTrainingId(rfpId);
+      const res = await fetch(`${API_BASE}/rfps/${rfpId}/train`, { method: "POST" });
+      if (!res.ok) throw new Error(`Train failed ${res.status}`);
+      const data = await res.json();
+      if (typeof data?.score === "number") {
+        setRfps((prev) => prev.map((r) => (r.id === rfpId ? { ...r, score: data.score } : r)));
+      }
+    } catch (e) {
+      console.error(e);
+      setError(e?.message || "Could not train model.");
+    } finally {
+      setTrainingId(null);
     }
   };
 
@@ -317,39 +374,52 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
-      <aside className="saved-panel">
+    <div className={`app-shell${savedOpen ? "" : " sidebar-collapsed"}`}>
+      <aside className={`saved-panel${savedOpen ? " open" : " collapsed"}`}>
         <div className="saved-header">
           <h2>Saved Opportunities</h2>
-          <span>{saved.length}</span>
+          <div className="saved-header-actions">
+            <span>{saved.length}</span>
+            <button
+              type="button"
+              className="saved-toggle"
+              onClick={() => setSavedOpen((v) => !v)}
+              aria-expanded={savedOpen}
+              title={savedOpen ? "Collapse saved panel" : "Expand saved panel"}
+            >
+              {savedOpen ? "◀" : "▶"}
+            </button>
+          </div>
         </div>
-        <div className="saved-list">
-          {saved.length === 0 && <p className="saved-empty">No saved RFPs yet. Save cards to curate your shortlist.</p>}
-          {saved.map((item) => (
-            <div key={item.id} className="saved-card">
-              <div className="saved-card-head">
-                <div>
-                  <h3>{item.title}</h3>
-                  <p>{item.agency}</p>
+        <div className="saved-body">
+          <div className="saved-list">
+            {saved.length === 0 && <p className="saved-empty">No saved RFPs yet. Save cards to curate your shortlist.</p>}
+            {saved.map((item) => (
+              <div key={item.id} className="saved-card">
+                <div className="saved-card-head">
+                  <div>
+                    <h3>{item.title}</h3>
+                    <p>{item.agency}</p>
+                  </div>
+                  <button className="icon-btn" onClick={() => handleRemoveSaved(item.rfp_id)} title="Remove">
+                    ✕
+                  </button>
                 </div>
-                <button className="icon-btn" onClick={() => handleRemoveSaved(item.rfp_id)} title="Remove">
-                  ✕
-                </button>
+                <div className="saved-actions">
+                  <button className="secondary" onClick={() => openSavedDetail(item)}>
+                    View Details
+                  </button>
+                  <button className="text-link" onClick={() => window.open(item.url, "_blank", "noopener,noreferrer")}>
+                    Original ↗
+                  </button>
+                </div>
+                <div className="saved-meta">
+                  <span>Posted: {item.posted_date || "—"}</span>
+                  <span>Due: {item.due_date || "—"}</span>
+                </div>
               </div>
-              <div className="saved-actions">
-                <button className="secondary" onClick={() => openSavedDetail(item)}>
-                  View Details
-                </button>
-                <button className="text-link" onClick={() => window.open(item.url, "_blank", "noopener,noreferrer")}>
-                  Original ↗
-                </button>
-              </div>
-              <div className="saved-meta">
-                <span>Posted: {item.posted_date || "—"}</span>
-                <span>Due: {item.due_date || "—"}</span>
-              </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       </aside>
       <main className="app-main">
@@ -398,6 +468,11 @@ export default function App() {
                 saving={savingId === r.id}
                 onNotInterested={() => handleExclude(r.id)}
                 excluding={excludingId === r.id}
+                onAdjust={(direction) => handleAdjust(r.id, direction)}
+                onTrain={() => handleTrain(r.id)}
+                feedback={r.user_feedback}
+                adjusting={adjustingId === r.id}
+                training={trainingId === r.id}
               />
             ))}
           </div>

@@ -8,7 +8,18 @@ const formatDateLabel = (value) => {
   return String(value).split("T")[0];
 };
 
-export default function RFPCard({ rfp, onSave, saving, onNotInterested, excluding }) {
+export default function RFPCard({
+  rfp,
+  onSave,
+  saving,
+  onNotInterested,
+  excluding,
+  onAdjust,
+  onTrain,
+  feedback,
+  adjusting,
+  training,
+}) {
   const title = rfp?.title || "Untitled";
   const agency = rfp?.agency || "";
   const url = rfp?.url || "";
@@ -17,6 +28,7 @@ export default function RFPCard({ rfp, onSave, saving, onNotInterested, excludin
   const due = formatDateLabel(rfp?.due_date);
   const tags = (Array.isArray(rfp?.focus_tags) && rfp.focus_tags.length ? rfp.focus_tags : ["Strategy"]).slice(0, 3);
   const summary = (rfp?.summary || rfp?.description || "").trim();
+  const feedbackValue = feedback || rfp?.user_feedback || null;
 
   const onClick = () => {
     if (url && /^https?:\/\//i.test(url)) {
@@ -42,7 +54,33 @@ export default function RFPCard({ rfp, onSave, saving, onNotInterested, excludin
       <div className="card-meta">
         <div className="meta-block">
           <span className="meta-label">Relevance</span>
-          <span className="meta-value">{score}</span>
+          <div className="meta-score-row">
+            <span className="meta-value">{score}</span>
+            {onAdjust ? (
+              <div className="feedback-controls">
+                <button
+                  type="button"
+                  className={`feedback-btn up${feedbackValue === "up" ? " active" : ""}`}
+                  onClick={() => onAdjust("up")}
+                  disabled={adjusting}
+                  title="Mark relevance higher"
+                  aria-pressed={feedbackValue === "up"}
+                >
+                  ▲
+                </button>
+                <button
+                  type="button"
+                  className={`feedback-btn down${feedbackValue === "down" ? " active" : ""}`}
+                  onClick={() => onAdjust("down")}
+                  disabled={adjusting}
+                  title="Mark relevance lower"
+                  aria-pressed={feedbackValue === "down"}
+                >
+                  ▼
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
         <div className="meta-block">
           <span className="meta-label">Posted</span>
@@ -66,6 +104,11 @@ export default function RFPCard({ rfp, onSave, saving, onNotInterested, excludin
         {onNotInterested ? (
           <button onClick={onNotInterested} className="danger" disabled={excluding}>
             {excluding ? "Removing…" : "Not interested"}
+          </button>
+        ) : null}
+        {onTrain ? (
+          <button onClick={onTrain} className="accent" disabled={training}>
+            {training ? "Training…" : "Train model"}
           </button>
         ) : null}
       </div>

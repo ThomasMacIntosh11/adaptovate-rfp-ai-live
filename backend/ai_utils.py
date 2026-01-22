@@ -102,20 +102,32 @@ def refine_relevance_score(
     base_score: float,
     rule_score: float | None = None,
     ai_score: float | None = None,
+    feedback: str | None = None,
+    calibration: str | None = None,
 ) -> Dict[str, int]:
     """
     Return {'score': 0..100, 'rationale': '...'} refined from an existing score.
     """
     client = _get_relevance_client()
+    feedback_note = (feedback or "").strip().lower()
+    if feedback_note not in ("higher", "lower"):
+        feedback_note = "none"
+    calibration_note = (calibration or "").strip()
+    if not calibration_note:
+        calibration_note = "none"
     prompt = (
         "You are a relevance scoring validator for ADAPTOVATE. "
         "Given the RFP text and the system's current score, return an adjusted score "
         "(0-100 integer) and a short rationale. Use the current score as a starting "
         "point and adjust modestly (+/- up to 25) unless there is strong evidence. "
+        "If USER_FEEDBACK is 'higher' or 'lower', move the score accordingly. "
+        "Use RECENT_FEEDBACK to calibrate what tends to be over/under-scored. "
         "Return ONLY a JSON object with fields: score (0-100 integer) and rationale (short string).\n\n"
         f"CURRENT_SCORE: {base_score}\n"
         f"RULE_SCORE: {rule_score if rule_score is not None else 'n/a'}\n"
         f"AI_SCORE: {ai_score if ai_score is not None else 'n/a'}\n"
+        f"USER_FEEDBACK: {feedback_note}\n"
+        f"RECENT_FEEDBACK:\n{calibration_note}\n"
         f"TEXT:\n{rfp_text}\n"
     )
     try:
@@ -140,6 +152,52 @@ def refine_relevance_score(
         return {"score": sc, "rationale": str(data.get("rationale", ""))[:400]}
     except Exception as e:
         return {"score": int(round(base_score)), "rationale": f"model error: {type(e).__name__}: {e}"}
+
+def submit_training_feedback(
+    rfp_text: str,
+    user_score: float,
+    system_score: float | None = None,
+    history: str | None = None,
+) -> Dict[str, str]:
+    """
+    Send a user-labeled score to the relevance bot and return a short calibration note.
+    """
+    client = _get_relevance_client()
+    history_note = (history or "").strip()
+    if not history_note:
+        history_note = "none"
+    prompt = (
+        "You are improving a relevance scoring system for ADAPTOVATE. "
+        "Given the RFP text and the USER_SCORE (what the user believes is correct), "
+        "provide a short calibration note (1-2 sentences) describing what signals to "
+        "emphasize or de-emphasize. Use HISTORY to understand recent user preferences. "
+        "Return ONLY a JSON object with fields: ack (true) and note (short string).\n\n"
+        f"USER_SCORE: {user_score}\n"
+        f"SYSTEM_SCORE: {system_score if system_score is not None else 'n/a'}\n"
+        f"HISTORY:\n{history_note}\n"
+        f"TEXT:\n{rfp_text}\n"
+    )
+    try:
+        resp = client.responses.create(
+            model=OPEN_AI_RELEVANCE_MODEL,
+            input=[
+                {"role": "system", "content": "You are a concise calibrator. Output JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        raw = resp.output_text if hasattr(resp, "output_text") else ""
+        if not raw and hasattr(resp, "choices"):
+            raw = resp.choices[0].message.content or ""
+
+        import json, re
+        m = re.search(r"\{.*\}", raw, re.S)
+        if not m:
+            return {"ack": "true", "note": "No JSON found from model output."}
+        data = json.loads(m.group(0))
+        note = str(data.get("note", ""))[:400]
+        return {"ack": str(data.get("ack", True)).lower(), "note": note}
+    except Exception as e:
+        return {"ack": "false", "note": f"model error: {type(e).__name__}: {e}"}
 
 def structured_summary(rfp_text: str) -> str:
     """

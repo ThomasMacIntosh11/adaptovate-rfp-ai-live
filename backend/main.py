@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 from rfp_scraper import scrape_real_rfps
 from relevance import compute_rule_score
-from ai_utils import summarize_rfp, score_relevance, refine_relevance_score, structured_summary, strategic_insights
+from ai_utils import summarize_rfp, score_relevance, refine_relevance_score, submit_training_feedback, structured_summary, strategic_insights
 from email_digest import run_digest
 
 # Always load env from backend folder
@@ -53,6 +53,68 @@ def _build_dedupe_key(title: str, agency: str, posted_date: str) -> str:
     a = (agency or "").strip() or "(agency)"
     p = (posted_date or "").strip() or "(date)"
     return f"{t}|{a}|{p}"
+
+def _build_rfp_text(record: dict) -> str:
+    title = (record.get("title") or "").strip()
+    agency = (record.get("agency") or "").strip()
+    description = (record.get("description") or "").strip()
+    url = (record.get("url") or "").strip()
+    posted_date = (record.get("posted_date") or "").strip()
+    due_date = (record.get("due_date") or "").strip()
+    return (
+        f"{title}\n\nAgency: {agency}\n\n{description}\n\nURL: {url or '(pending)'}"
+        f"\nPosted: {posted_date or '(unspecified)'}\nDue: {due_date or '(unspecified)'}"
+    )
+
+def _clip_text(value: str, limit: int = 220) -> str:
+    text = (value or "").strip().replace("\n", " ")
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+def _load_feedback_calibration(conn: sqlite3.Connection) -> str:
+    days = int(os.getenv("FEEDBACK_CALIBRATION_DAYS", "60"))
+    limit = int(os.getenv("FEEDBACK_CALIBRATION_LIMIT", "30"))
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT f.direction, f.trained_at, f.user_score, f.system_score,
+               r.title, r.agency, r.summary, r.description
+        FROM rfp_feedback f
+        JOIN rfps r ON r.id = f.rfp_id
+        WHERE f.trained_at IS NOT NULL
+          AND f.trained_at >= datetime('now', ?)
+        ORDER BY f.trained_at DESC
+        LIMIT ?
+        """,
+        (f"-{days} days", limit),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        return ""
+    lines = ["Recent user feedback (most recent first):"]
+    for row in rows:
+        record = dict(row)
+        direction = "higher" if record.get("direction") == 1 else "lower"
+        title = _clip_text(record.get("title", "") or "(untitled)", 120)
+        agency = _clip_text(record.get("agency", ""), 80)
+        summary = record.get("summary") or record.get("description") or ""
+        summary = _clip_text(summary, 160)
+        user_score = record.get("user_score")
+        system_score = record.get("system_score")
+        user_label = f"{user_score:.1f}" if isinstance(user_score, (int, float)) else "n/a"
+        system_label = f"{system_score:.1f}" if isinstance(system_score, (int, float)) else "n/a"
+        delta = None
+        if isinstance(user_score, (int, float)) and isinstance(system_score, (int, float)):
+            delta = user_score - system_score
+        delta_label = f"{delta:+.1f}" if isinstance(delta, (int, float)) else "n/a"
+        parts = [f"{direction} | user {user_label} vs system {system_label} ({delta_label}) | {title}"]
+        if agency:
+            parts.append(f"agency: {agency}")
+        if summary:
+            parts.append(f"summary: {summary}")
+        lines.append(" - " + " | ".join(parts))
+    return "\n".join(lines)
 
 def _load_focus_terms():
     seen = set()
@@ -293,6 +355,32 @@ def _ensure_schema(conn: sqlite3.Connection):
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS rfp_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rfp_id INTEGER UNIQUE,
+                direction INTEGER NOT NULL DEFAULT 0,
+                user_score REAL,
+                system_score REAL,
+                created_at TEXT,
+                updated_at TEXT,
+                trained_at TEXT
+            )
+            """
+        )
+        try:
+            conn.execute("ALTER TABLE rfp_feedback ADD COLUMN user_score REAL")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE rfp_feedback ADD COLUMN system_score REAL")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE rfp_feedback ADD COLUMN trained_at TEXT")
+        except sqlite3.OperationalError:
+            pass
+        conn.execute(
+            """
             UPDATE rfps
             SET dedupe_key = CASE
                 WHEN TRIM(IFNULL(title, '')) = '' AND TRIM(IFNULL(agency, '')) = '' AND TRIM(IFNULL(posted_date, '')) = ''
@@ -351,6 +439,9 @@ class RefreshResponse(BaseModel):
 
 class SaveRequest(BaseModel):
     generate_summary: bool = True
+
+class AdjustRequest(BaseModel):
+    direction: str
 
 class NoteRequest(BaseModel):
     note: str
@@ -431,12 +522,15 @@ def list_rfps(
         like = f"%{q.strip()}%"
         cur.execute(
             f"""
-            SELECT id, title, agency, summary, description, url, score, posted_date, due_date, created_at
+            SELECT rfps.id, rfps.title, rfps.agency, rfps.summary, rfps.description, rfps.url,
+                   rfps.score, rfps.posted_date, rfps.due_date, rfps.created_at,
+                   f.direction AS feedback_direction
             FROM rfps
+            LEFT JOIN rfp_feedback f ON f.rfp_id = rfps.id
             WHERE {due_clause} AND {recent_clause} AND {exclude_clause} AND (title LIKE ? OR summary LIKE ? OR agency LIKE ?)
             ORDER BY score DESC,
                      datetime(posted_date) DESC,
-                     datetime(created_at) DESC
+                     datetime(rfps.created_at) DESC
             LIMIT ? OFFSET ?
             """,
             (like, like, like, limit, offset),
@@ -444,12 +538,15 @@ def list_rfps(
     else:
         cur.execute(
             f"""
-            SELECT id, title, agency, summary, description, url, score, posted_date, due_date, created_at
+            SELECT rfps.id, rfps.title, rfps.agency, rfps.summary, rfps.description, rfps.url,
+                   rfps.score, rfps.posted_date, rfps.due_date, rfps.created_at,
+                   f.direction AS feedback_direction
             FROM rfps
+            LEFT JOIN rfp_feedback f ON f.rfp_id = rfps.id
             WHERE {due_clause} AND {recent_clause} AND {exclude_clause}
             ORDER BY score DESC,
                      datetime(posted_date) DESC,
-                     datetime(created_at) DESC
+                     datetime(rfps.created_at) DESC
             LIMIT ? OFFSET ?
             """,
             (limit, offset),
@@ -458,6 +555,13 @@ def list_rfps(
     for row in rows:
         row["posted_date"] = _format_posted_date(row.get("posted_date", ""))
         row["due_date"] = _format_due_date(row.get("due_date", ""))
+        feedback_direction = row.pop("feedback_direction", None)
+        if feedback_direction == 1:
+            row["user_feedback"] = "up"
+        elif feedback_direction == -1:
+            row["user_feedback"] = "down"
+        else:
+            row["user_feedback"] = None
         haystack = " ".join([
             row.get("title", ""),
             row.get("summary", ""),
@@ -515,6 +619,136 @@ def exclude_rfp_item(rfp_id: int):
     conn.commit()
     conn.close()
     return {"excluded": True, "rfp_id": rfp_id}
+
+@app.post("/rfps/{rfp_id}/adjust")
+def adjust_rfp_score(rfp_id: int, payload: AdjustRequest):
+    direction = (payload.direction or "").strip().lower()
+    if direction not in ("up", "down"):
+        raise HTTPException(status_code=400, detail="direction must be 'up' or 'down'")
+
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, title, agency, summary, description, url, score, posted_date, due_date
+        FROM rfps
+        WHERE id=?
+        """,
+        (rfp_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="RFP not found")
+
+    record = dict(row)
+    base_score = float(record.get("score") or 0.0)
+    delta = 1.0 if direction == "up" else -1.0
+    new_score = max(0.0, min(100.0, base_score + delta))
+    now = datetime.utcnow().isoformat(timespec="seconds")
+
+    cur.execute(
+        """
+        INSERT INTO rfp_feedback(rfp_id, direction, user_score, system_score, created_at, updated_at, trained_at)
+        VALUES (?, ?, ?, ?, ?, ?, NULL)
+        ON CONFLICT(rfp_id) DO UPDATE SET
+            direction=excluded.direction,
+            user_score=excluded.user_score,
+            system_score=COALESCE(rfp_feedback.system_score, excluded.system_score),
+            updated_at=excluded.updated_at,
+            trained_at=NULL
+        """,
+        (rfp_id, 1 if direction == "up" else -1, new_score, base_score, now, now),
+    )
+    cur.execute("UPDATE rfps SET score=? WHERE id=?", (new_score, rfp_id))
+    cur.execute("UPDATE saved_rfps SET score=? WHERE rfp_id=?", (new_score, rfp_id))
+    conn.commit()
+    conn.close()
+    return {
+        "ok": True,
+        "rfp_id": rfp_id,
+        "direction": direction,
+        "score": float(round(new_score, 1)),
+    }
+
+@app.post("/rfps/{rfp_id}/train")
+def train_rfp_score(rfp_id: int):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, title, agency, summary, description, url, score, posted_date, due_date
+        FROM rfps
+        WHERE id=?
+        """,
+        (rfp_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="RFP not found")
+
+    record = dict(row)
+    rfp_text = _build_rfp_text(record)
+    base_score = float(record.get("score") or 0.0)
+
+    cur.execute(
+        """
+        SELECT user_score, system_score
+        FROM rfp_feedback
+        WHERE rfp_id=?
+        """,
+        (rfp_id,),
+    )
+    fb_row = cur.fetchone()
+    user_score = base_score
+    system_score = base_score
+    if fb_row:
+        fb = dict(fb_row)
+        if isinstance(fb.get("user_score"), (int, float)):
+            user_score = float(fb.get("user_score"))
+        if isinstance(fb.get("system_score"), (int, float)):
+            system_score = float(fb.get("system_score"))
+
+    calibration_notes = ""
+    try:
+        calibration_notes = _load_feedback_calibration(conn)
+    except Exception as e:
+        print(f"[TRAIN] calibration error: {type(e).__name__}: {e}")
+
+    bot_note = ""
+    try:
+        resp = submit_training_feedback(
+            rfp_text,
+            user_score=user_score,
+            system_score=system_score,
+            history=calibration_notes,
+        )
+        bot_note = str(resp.get("note", ""))[:400]
+    except Exception as e:
+        bot_note = f"model error: {type(e).__name__}: {e}"
+
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    cur.execute(
+        """
+        INSERT INTO rfp_feedback(rfp_id, direction, user_score, system_score, created_at, updated_at, trained_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(rfp_id) DO UPDATE SET
+            user_score=excluded.user_score,
+            system_score=COALESCE(rfp_feedback.system_score, excluded.system_score),
+            updated_at=excluded.updated_at,
+            trained_at=excluded.trained_at
+        """,
+        (rfp_id, 0, user_score, system_score, now, now, now),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "ok": True,
+        "rfp_id": rfp_id,
+        "score": float(round(user_score, 1)),
+        "note": bot_note,
+    }
 
 @app.get("/saved")
 def list_saved():
@@ -829,6 +1063,14 @@ def refresh_rfps(limit: int = 300, no_ai: bool = False):
         print(f"[FILTER] Dropped {len(items) - len(filtered_items)} items below MIN_RULE_SCORE={MIN_RULE_SCORE}")
     items = filtered_items
 
+    calibration_notes = ""
+    try:
+        conn = _conn()
+        calibration_notes = _load_feedback_calibration(conn)
+        conn.close()
+    except Exception as e:
+        errors.append(f"feedback calibration: {type(e).__name__}: {e}")
+
     # Select AI targets
     ai_targets = [] if no_ai else sorted(items, key=lambda x: x["_rule_score"], reverse=True)[:AI_TOP_N]
     ai_ids = {id(o) for o in ai_targets}
@@ -870,6 +1112,7 @@ def refresh_rfps(limit: int = 300, no_ai: bool = False):
                         base_score=final_score,
                         rule_score=rule_score,
                         ai_score=ai_score,
+                        calibration=calibration_notes,
                     )
                     final_score = float(refined.get("score", final_score))
                 except Exception as e:
